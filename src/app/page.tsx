@@ -16,7 +16,14 @@ import {
 import { getCurrentUser } from "@/lib/auth";
 import { isDatabaseConfigured } from "@/lib/db";
 import { asNumber, formatDate, formatNumber } from "@/lib/format";
-import { getDashboard, type DeviceSummary, type ProjectSummary, type SecurityEvent } from "@/lib/repository";
+import {
+  getDashboard,
+  listAttackScenarios,
+  type DeviceSummary,
+  type ProjectSummary,
+  type SecurityAlert,
+  type SecurityEvent,
+} from "@/lib/repository";
 import { SetupRequired } from "@/components/setup-required";
 
 export const dynamic = "force-dynamic";
@@ -147,7 +154,7 @@ function EventRows({ events }: { events: SecurityEvent[] }) {
   if (events.length === 0) {
     return (
       <tr>
-        <td className="px-4 py-6 text-sm text-[#65736d]" colSpan={6}>
+        <td className="px-4 py-6 text-sm text-[#65736d]" colSpan={8}>
           Events will appear here after a device posts to <code className="font-mono">/api/ingest</code>.
         </td>
       </tr>
@@ -167,10 +174,55 @@ function EventRows({ events }: { events: SecurityEvent[] }) {
       </td>
       <td className="px-4 py-3 text-sm text-[#52625b]">{event.source_ip}</td>
       <td className="px-4 py-3 text-sm text-[#52625b]">{event.device_name ?? "Unknown"}</td>
+      <td className="px-4 py-3">
+        <p className="text-sm font-semibold text-[#17201c]">{event.category.replaceAll("_", " ")}</p>
+        <p className="font-mono text-xs text-[#65736d]">{event.confidence}% confidence</p>
+      </td>
       <td className="px-4 py-3 text-sm text-[#52625b]">{event.summary}</td>
+      <td className="px-4 py-3 text-sm text-[#52625b]">{event.recommended_action}</td>
       <td className="px-4 py-3 text-sm text-[#52625b]">{formatDate(event.created_at)}</td>
     </tr>
   ));
+}
+
+function AlertList({ alerts }: { alerts: SecurityAlert[] }) {
+  if (alerts.length === 0) {
+    return <p className="text-sm text-[#65736d]">No open alerts.</p>;
+  }
+
+  return (
+    <div className="grid gap-3">
+      {alerts.map((alert) => (
+        <div
+          className="rounded-md border border-[#f3b9b1] bg-[#fff7f6] p-4"
+          key={alert.id}
+        >
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold uppercase tracking-normal text-[#9f2d24]">
+                {alert.severity}
+              </p>
+              <h3 className="mt-1 font-semibold text-[#17201c]">{alert.title}</h3>
+              <p className="mt-2 text-sm leading-6 text-[#65736d]">{alert.description}</p>
+            </div>
+            <form action="/api/alerts/resolve" method="post">
+              <input name="alertId" type="hidden" value={alert.id} />
+              <button
+                className="rounded-md border border-[#d4b4af] bg-white px-3 py-2 text-sm font-semibold text-[#7a2d27] transition hover:border-[#9f2d24]"
+                type="submit"
+              >
+                Resolve
+              </button>
+            </form>
+          </div>
+          <p className="mt-3 text-sm leading-6 text-[#52625b]">{alert.action}</p>
+          <p className="mt-3 font-mono text-xs text-[#65736d]">
+            {alert.source_ip ?? "unknown source"} | score {alert.score ?? 0} | {formatDate(alert.created_at)}
+          </p>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 export default async function Home({ searchParams }: { searchParams?: SearchParams }) {
@@ -186,7 +238,9 @@ export default async function Home({ searchParams }: { searchParams?: SearchPara
 
   const params = searchParams ? await searchParams : {};
   const welcome = params.welcome === "1";
+  const simulationStatus = params.simulation;
   const data = await getDashboard(user.id);
+  const attackScenarios = listAttackScenarios();
 
   return (
     <main className="min-h-screen bg-[#f6f7f2] text-[#17201c]">
@@ -230,12 +284,13 @@ export default async function Home({ searchParams }: { searchParams?: SearchPara
           </section>
         ) : null}
 
-        <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+        <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-6">
           <MetricCard icon={ShieldCheck} label="Projects" value={formatNumber(data.stats.project_count)} tone="text-[#2f6f5f]" />
           <MetricCard icon={Cpu} label="Devices" value={formatNumber(data.stats.device_count)} tone="text-[#2f6f5f]" />
           <MetricCard icon={Activity} label="Events" value={formatNumber(data.stats.event_count)} tone="text-[#b7791f]" />
           <MetricCard icon={Siren} label="Malicious" value={formatNumber(data.stats.malicious_count)} tone="text-[#b8322a]" />
           <MetricCard icon={Ban} label="Blocked IPs" value={formatNumber(data.stats.blocked_count)} tone="text-[#a33d3d]" />
+          <MetricCard icon={ShieldAlert} label="Open Alerts" value={formatNumber(data.stats.alert_count)} tone="text-[#a33d3d]" />
         </section>
 
         <section className="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
@@ -310,9 +365,87 @@ export default async function Home({ searchParams }: { searchParams?: SearchPara
                 </button>
               </form>
             </section>
+
+            <section id="attack-lab" className="rounded-md border border-[#d8ded5] bg-white p-5 shadow-sm">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-semibold">Attack Lab</h2>
+                  <p className="mt-1 text-sm text-[#65736d]">Generate controlled malicious telemetry for a device.</p>
+                </div>
+                <Siren className="h-5 w-5 text-[#b8322a]" aria-hidden="true" />
+              </div>
+
+              {simulationStatus === "created" ? (
+                <p className="mt-4 rounded-md border border-[#bfe7cf] bg-[#e3f6eb] px-3 py-2 text-sm text-[#236447]">
+                  Simulation created. Review the new event, alert, and blocklist entry.
+                </p>
+              ) : null}
+              {simulationStatus === "failed" ? (
+                <p className="mt-4 rounded-md border border-[#f3b9b1] bg-[#fde2df] px-3 py-2 text-sm text-[#9f2d24]">
+                  Simulation failed. Choose a device that belongs to the selected project.
+                </p>
+              ) : null}
+
+              <form action="/api/simulations" className="mt-4 grid gap-3" method="post">
+                <select
+                  className="rounded-md border border-[#cfd8d1] px-3 py-2 text-sm outline-none transition focus:border-[#2f6f5f] focus:ring-2 focus:ring-[#a7e3cc]"
+                  name="projectId"
+                  required
+                >
+                  {data.projects.map((project) => (
+                    <option key={project.id} value={project.id}>
+                      {project.name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  className="rounded-md border border-[#cfd8d1] px-3 py-2 text-sm outline-none transition focus:border-[#2f6f5f] focus:ring-2 focus:ring-[#a7e3cc]"
+                  name="deviceId"
+                  required
+                >
+                  {data.devices.map((device) => (
+                    <option key={device.id} value={device.id}>
+                      {device.name} | {device.project_name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  className="rounded-md border border-[#cfd8d1] px-3 py-2 text-sm outline-none transition focus:border-[#2f6f5f] focus:ring-2 focus:ring-[#a7e3cc]"
+                  name="scenario"
+                  required
+                >
+                  {attackScenarios.map((scenario) => (
+                    <option key={scenario.id} value={scenario.id}>
+                      {scenario.label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  className="inline-flex w-fit items-center gap-2 rounded-md bg-[#a33d3d] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#862f2f]"
+                  disabled={data.projects.length === 0 || data.devices.length === 0}
+                  type="submit"
+                >
+                  <Siren className="h-4 w-4" aria-hidden="true" />
+                  Run simulation
+                </button>
+              </form>
+            </section>
           </div>
 
           <div className="space-y-6">
+            <section id="alerts" className="rounded-md border border-[#d8ded5] bg-white p-5 shadow-sm">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-semibold">Open Alerts</h2>
+                  <p className="mt-1 text-sm text-[#65736d]">High-confidence detections that need review.</p>
+                </div>
+                <ShieldAlert className="h-5 w-5 text-[#a33d3d]" aria-hidden="true" />
+              </div>
+              <div className="mt-4">
+                <AlertList alerts={data.alerts} />
+              </div>
+            </section>
+
             <section className="overflow-hidden rounded-md border border-[#d8ded5] bg-white shadow-sm">
               <div className="flex items-center justify-between gap-3 p-5">
                 <div>
@@ -348,14 +481,16 @@ export default async function Home({ searchParams }: { searchParams?: SearchPara
                 <ShieldAlert className="h-5 w-5 text-[#b7791f]" aria-hidden="true" />
               </div>
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[920px] text-left">
+                <table className="w-full min-w-[1220px] text-left">
                   <thead className="bg-[#f6f7f2] text-xs uppercase tracking-normal text-[#65736d]">
                     <tr>
                       <th className="px-4 py-3">Verdict</th>
                       <th className="px-4 py-3">Score</th>
                       <th className="px-4 py-3">Source IP</th>
                       <th className="px-4 py-3">Device</th>
+                      <th className="px-4 py-3">Detection</th>
                       <th className="px-4 py-3">Reason</th>
+                      <th className="px-4 py-3">Action</th>
                       <th className="px-4 py-3">Time</th>
                     </tr>
                   </thead>

@@ -112,7 +112,10 @@ async function createSchema() {
       severity text NOT NULL,
       score integer NOT NULL,
       verdict text NOT NULL,
+      category text NOT NULL DEFAULT 'baseline',
+      confidence integer NOT NULL DEFAULT 35,
       summary text NOT NULL,
+      recommended_action text NOT NULL DEFAULT 'No action required beyond normal monitoring.',
       signals jsonb NOT NULL DEFAULT '[]'::jsonb,
       packet jsonb NOT NULL DEFAULT '{}'::jsonb,
       raw jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -134,6 +137,28 @@ async function createSchema() {
   `;
 
   await query`
+    CREATE TABLE IF NOT EXISTS alerts (
+      id text PRIMARY KEY,
+      project_id text NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      event_id text REFERENCES events(id) ON DELETE SET NULL,
+      severity text NOT NULL,
+      title text NOT NULL,
+      description text NOT NULL,
+      action text NOT NULL,
+      resolved boolean NOT NULL DEFAULT false,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      resolved_at timestamptz
+    )
+  `;
+
+  await query`
+    ALTER TABLE events
+      ADD COLUMN IF NOT EXISTS category text NOT NULL DEFAULT 'baseline',
+      ADD COLUMN IF NOT EXISTS confidence integer NOT NULL DEFAULT 35,
+      ADD COLUMN IF NOT EXISTS recommended_action text NOT NULL DEFAULT 'No action required beyond normal monitoring.'
+  `;
+
+  await query`
     CREATE INDEX IF NOT EXISTS idx_events_project_created
       ON events (project_id, created_at DESC)
   `;
@@ -151,5 +176,10 @@ async function createSchema() {
   await query`
     CREATE INDEX IF NOT EXISTS idx_blocked_ips_project_active
       ON blocked_ips (project_id, active)
+  `;
+
+  await query`
+    CREATE INDEX IF NOT EXISTS idx_alerts_project_open
+      ON alerts (project_id, resolved, created_at DESC)
   `;
 }

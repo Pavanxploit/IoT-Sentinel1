@@ -3,6 +3,7 @@ import { z } from "zod";
 import { analyzePayload } from "@/lib/risk";
 import { getRequestIp } from "@/lib/request";
 import {
+  createDetectionAlert,
   findActiveBlock,
   getRecentIpEventCount,
   recordSecurityEvent,
@@ -115,6 +116,14 @@ export async function POST(request: Request) {
   });
 
   if (activeBlock) {
+    await createDetectionAlert({
+      projectId,
+      eventId: event.id,
+      sourceIp,
+      analysis,
+      blocked: true,
+    });
+
     return NextResponse.json(
       {
         accepted: false,
@@ -139,6 +148,14 @@ export async function POST(request: Request) {
     });
     blocked = true;
   }
+
+  await createDetectionAlert({
+    projectId,
+    eventId: event.id,
+    sourceIp,
+    analysis,
+    blocked,
+  });
 
   return NextResponse.json(
     {
