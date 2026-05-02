@@ -193,6 +193,8 @@ git push origin main
 
 ## Product Roadmap
 
+See [ROADMAP.md](ROADMAP.md) for the clear 30-day path from portfolio project to deployed security product demo.
+
 - Email or Slack alerts for critical detections
 - Project invitation workflow with roles
 - Device token rotation UI
